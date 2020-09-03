@@ -1,3 +1,4 @@
+import datetime
 import json
 import sqlite3
 import sys
@@ -10,83 +11,9 @@ app = Flask(__name__)
 dbpath = 'data.db'
 conn = sqlite3.connect(dbpath, check_same_thread=False)
 
-'''
-inputs = (
-    'customer_id',
-    'first_name',
-    'last_name',
-    'address',
-    'state',
-    'zipcode',
-    'status',
-    'product_id',
-    'product_name',
-    'amount',
-    'date_time'
-)
+# maximum number of borrowed books allowed
+max_books = 2
 
-
-def dict_factory(cursor, row):
-    d = {}
-    for idx, col in enumerate(cursor.description):
-        d[col[0]] = row[idx]
-    return d
-
-
-# various database functions for customer/product (assumes know data_types)
-
-def insert_customer(row):
-    c = conn.cursor()
-    query = "INSERT INTO Customer VALUES (%s,'%s','%s','%s','%s',%s);" % row
-    c.execute(query)
-
-def insert_product(row):
-    c = conn.cursor()
-    query = "INSERT INTO Product VALUES ('%s',%s,'%s','%s','%s',%s);" % row
-    c.execute(query)
-
-def update_customer(row):
-    c = conn.cursor()
-    query = "DELETE FROM Customer WHERE id = %s;" % row[0]
-    c.execute(query)
-    insert_customer(row)
-
-def update_product(row):
-    c = conn.cursor()
-    query = "DELETE FROM Product WHERE status = '%s' AND id = %s;" % (row[0], row[1])
-    c.execute(query)
-    insert_product(row)
-
-def check_customer(row):
-    exists = query_table('Customer', {'id': row[0]})
-    return True if exists else False
-
-def check_product(row):
-    exists = query_table('Product', {'id': row[1], 'status': row[0]})
-    return True if exists else False
-
-def upsert_customer(row):
-    if check_customer(row):
-        update_customer(row)
-    else:
-        insert_customer(row)
-
-def upsert_product(row):
-    if check_product(row):
-        update_product(row)
-    else:
-        insert_product(row)
-
-def upsert_db(cols):
-    upsert_customer(tuple(cols[:6]))
-    upsert_product(tuple(cols[6:] + [cols[0]]))
-    conn.commit()
-
-
-@app.route("/librarian/add", methods=["POST"])
-def update_data():
-    return jsonify(parse_data(request.data))
-'''
 
 def select_query(query):
     c = conn.cursor()
@@ -96,30 +23,51 @@ def select_query(query):
     data = [dict(zip(cols, row)) for row in rows]
     return data
 
+
 # check valid user
 def check_user(user, librarian=False):
     query = """
-        SELECT r.role
+        SELECT r.role AS role, u.id AS user_id
           FROM Roles r
          INNER JOIN Users u ON u.role_id = r.id
          WHERE u.name = '%s';
     """ % user
     role = select_query(query)
     if librarian and role[0].get('role') == 'librarian':
-        return True
+        return role[0].get('user_id')
     elif not librarian and role:
-        return True
+        return role[0].get('user_id')
     return False
+
 
 # query all books
 def query_books():
     query = 'SELECT * FROM Books;'
     return select_query(query)
 
+
+# query all books with details
+def query_details():
+    query = """
+        SELECT u.id AS user_id,
+               u.name AS user_name,
+               b.id AS book_id,
+               b.isbn AS ISBN,
+               b.title AS Title,
+               x.date_out AS 'Checked Out',
+               x.date_due AS 'Due Date'
+          FROM Books b
+          LEFT OUTER JOIN Borrowed x ON x.book_id = b.id
+          LEFT OUTER JOIN Users u ON u.id = x.user_id;
+    """
+    return select_query(query)
+
+
 # query book by ID
 def query_book_id(id):
     query = 'SELECT * FROM Books WHERE id = %d;' % id
     return select_query(query)
+
 
 # delete book by ID
 def delete_book_id(id):
@@ -127,6 +75,7 @@ def delete_book_id(id):
     c = conn.cursor()
     c.execute(query)
     return conn.commit()
+
 
 # insert book by ISBN and Title
 def insert_book(book):
@@ -139,10 +88,12 @@ def insert_book(book):
     conn.commit()
     return c.lastrowid
 
+
 # query book by ISBN
 def query_book_isbn(isbn):
     query = "SELECT * FROM Books WHERE isbn = '%s';" % isbn
     return select_query(query)
+
 
 # check ISBN
 def check_isbn(isbn):
@@ -151,6 +102,97 @@ def check_isbn(isbn):
     if len(isbn) == 10 or len(isbn) == 13:
         return True
     return False
+
+
+# checkout book by IDs
+def checkout_book_id(user_id, book_id):
+    now_date = datetime.datetime.now().strftime('%Y-%m-%d')
+    due_date = (datetime.datetime.now() + datetime.timedelta(days=14)).strftime('%Y-%m-%d')
+    # use the following to similate overdue books:
+    # due_date = (datetime.datetime.now() - datetime.timedelta(days=21)).strftime('%Y-%m-%d')
+    query = """
+        INSERT INTO Borrowed(user_id, book_id, date_out, date_due)
+        VALUES (%d, %d, '%s', '%s');
+    """ % (user_id, book_id, now_date, due_date)
+    c = conn.cursor()
+    c.execute(query)
+    return conn.commit()
+
+
+# return book by IDs
+def return_book_id(user_id, book_id):
+    query = """
+        DELETE FROM Borrowed
+         WHERE user_id = %d AND book_id = %s;
+    """ % (user_id, book_id)
+    c = conn.cursor()
+    c.execute(query)
+    return conn.commit()
+
+
+# query borrowed book by User ID
+def query_borrowed(user_id):
+    query = """
+        SELECT b.id,
+               b.isbn AS ISBN,
+               b.title AS Title,
+               x.date_out AS 'Checked Out',
+               x.date_due AS 'Due Date'
+          FROM Borrowed x
+         INNER JOIN Books b ON b.id = x.book_id
+         INNER JOIN Users u ON u.id = x.user_id
+         WHERE u.id = %d;
+    """ % user_id
+    return select_query(query)
+
+
+# query overdue books by
+def query_overdue():
+    query = """
+        SELECT u.id AS user_id,
+               u.name AS user_name,
+               b.id AS book_id,
+               b.isbn AS ISBN,
+               b.title AS Title,
+               x.date_out AS 'Checked Out',
+               x.date_due AS 'Due Date'
+          FROM Borrowed x
+         INNER JOIN Books b ON b.id = x.book_id
+         INNER JOIN Users u ON u.id = x.user_id
+         WHERE x.date_due <= strftime('%Y-%m-%d', 'now');
+    """
+    return select_query(query)
+
+
+# check if user has overdue books
+def check_overdue(user_id):
+    overdue = query_overdue()
+    for book in overdue:
+        if user_id == book.get('user_id'):
+            return True
+    return False
+
+
+# query available books
+def query_available():
+    query = """
+        SELECT isbn AS ISBN, title AS Title
+          FROM Books
+         WHERE id NOT IN (
+            SELECT book_id FROM Borrowed
+         );
+    """
+    return select_query(query)
+
+
+# verify that user has borrowed book, return number of borrowed books
+def verify_borrowed(user_id, book_id):
+    borrowed = query_borrowed(user_id)
+    for book in borrowed:
+        if book_id == book.get('id'):
+            return True, borrowed
+    return False, borrowed
+
 
 @app.route("/spec")
 def spec():
@@ -163,10 +205,6 @@ def spec():
     })
     return jsonify(library)
 
-'''
-Librarian Endpoints:
-* An endpoint that generates a list of all overdue books.
-'''
 
 @app.route("/librarian/book", methods=["POST"])
 def add_book():
@@ -216,6 +254,7 @@ def add_book():
         return {'Success': 'ISBN (%s) added to library as Book (%d)' % (isbn, book_id)}, 200
     return {'Error': 'Failed to insert ISBN (%s)' % isbn}, 500
 
+
 @app.route("/librarian/book/<int:book_id>", methods=["DELETE"])
 def remove_book(book_id):
     '''
@@ -249,6 +288,7 @@ def remove_book(book_id):
         return {'Success': 'Book (%d) deleted successfully' % book_id}, 200
     return {'Error': 'Failed to delete book (%d)' % book_id}, 500
 
+
 @app.route("/librarian/catalog", methods=["GET"])
 def list_catalog():
     '''
@@ -277,8 +317,10 @@ def list_catalog():
     catalog = query_books()
     if not catalog:
         return {'Error': 'Library currently has no books'}, 404
-    # if request.args.get('details'):
+    if request.args.get('details'):
+        return jsonify(query_details())
     return jsonify(catalog)
+
 
 @app.route("/librarian/overdue", methods=["GET"])
 def list_overdue():
@@ -300,16 +342,8 @@ def list_overdue():
     user = request.headers.get('user')
     if not check_user(user, True):
         return {'Error': 'User (%s) does not have librarian privileges' % user}, 401
-    return {}
+    return jsonify(query_overdue())
 
-'''
-User Endpoints:
-* An endpoint to check out a book (assume a 2 week checkout period from time of call).  A User can check out any book except when:
-  - They currently have 3 checked out books.
-  - They are overdue on returning any book.
-* An endpoint to return a checked out book to the library
-* An endpoint that lists all currently checked out books for that user.
-'''
 
 @app.route("/user/checkout/<int:book_id>", methods=["GET"])
 def checkout_book(book_id):
@@ -339,11 +373,23 @@ def checkout_book(book_id):
         description: Book already checked out
     '''
     user = request.headers.get('user')
-    if not check_user(user, False):
+    user_id = check_user(user, False)
+    if not user_id:
         return {'Error': 'User (%s) does not have library card' % user}, 401
     if not query_book_id(book_id):
         return {'Error': 'Book (%d) does not exist in library' % book_id}, 404
-    return {}
+    borrowed, books = verify_borrowed(user_id, book_id)
+    if borrowed:
+        return {'Error': 'Book (%d) was already checked out by User (%s)' % (book_id, user)}, 423
+    if len(books) >= max_books:
+        return {'Error': 'User (%s) already has max books (%d) checked out' % (user, max_books)}, 403
+    if check_overdue(user_id):
+        return {'Error': 'User (%s) has overdue book(s) and cannot check out' % (user)}, 403
+    error = checkout_book_id(user_id, book_id)
+    if not error:
+        return {'Success': 'User (%s) has checked out Book (%d)' % (user, book_id)}, 200
+    return {'Error': 'Failed to checkout book (%d)' % book_id}, 500
+
 
 @app.route("/user/available", methods=["GET"])
 def list_available():
@@ -367,7 +413,11 @@ def list_available():
     user = request.headers.get('user')
     if not check_user(user, False):
         return {'Error': 'User (%s) does not have library card' % user}, 401
-    return {}
+    avail = query_available()
+    if not avail:
+        return {'Error': 'All library books appear to be checked out'}, 404
+    return jsonify(avail)
+
 
 @app.route("/user/return/<int:book_id>", methods=["GET"])
 def return_book(book_id):
@@ -386,7 +436,7 @@ def return_book(book_id):
         description: ID of book (see /user/borrowed)
     responses:
       200:
-        description: Book added
+        description: Book returned
       401:
         description: User not valid
       403:
@@ -395,9 +445,19 @@ def return_book(book_id):
         description: Book does not exist
     '''
     user = request.headers.get('user')
-    if not check_user(user, False):
+    user_id = check_user(user, False)
+    if not user_id:
         return {'Error': 'User (%s) does not have library card' % user}, 401
-    return {}
+    if not query_book_id(book_id):
+        return {'Error': 'Book (%d) does not exist in library' % book_id}, 404
+    borrowed, books = verify_borrowed(user_id, book_id)
+    if not borrowed:
+        return {'Error': 'Book (%d) was not checked out by User (%s)' % (book_id, user)}, 403
+    error = return_book_id(user_id, book_id)
+    if not error:
+        return {'Success': 'User (%s) has returned Book (%d)' % (user, book_id)}, 200
+    return {'Error': 'Failed to return book (%d)' % book_id}, 500
+
 
 @app.route("/user/borrowed", methods=["GET"])
 def list_borrowed():
@@ -417,9 +477,11 @@ def list_borrowed():
         description: User not valid
     '''
     user = request.headers.get('user')
-    if not check_user(user, False):
+    user_id = check_user(user, False)
+    if not user_id:
         return {'Error': 'User (%s) does not have library card' % user}, 401
-    return {}
+    return jsonify(query_borrowed(user_id))
+
 
 if __name__ == '__main__':
     SWAGGER_URL = '/api/docs'
