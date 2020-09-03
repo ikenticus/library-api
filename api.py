@@ -116,6 +116,42 @@ def query_books():
     query = 'SELECT * FROM Books;'
     return select_query(query)
 
+# query book by ID
+def query_book_id(id):
+    query = 'SELECT * FROM Books WHERE id = %d;' % id
+    return select_query(query)
+
+# delete book by ID
+def delete_book_id(id):
+    query = 'DELETE FROM Books WHERE id = %d;' % id
+    c = conn.cursor()
+    c.execute(query)
+    return conn.commit()
+
+# insert book by ISBN and Title
+def insert_book(book):
+    query = """
+        INSERT INTO Books(isbn, title)
+        VALUES ('%s', '%s')
+    """ % (book.get('isbn'), book.get('title'))
+    c = conn.cursor()
+    c.execute(query)
+    conn.commit()
+    return c.lastrowid
+
+# query book by ISBN
+def query_book_isbn(isbn):
+    query = "SELECT * FROM Books WHERE isbn = '%s';" % isbn
+    return select_query(query)
+
+# check ISBN
+def check_isbn(isbn):
+    if not isbn.isnumeric():
+        return False
+    if len(isbn) == 10 or len(isbn) == 13:
+        return True
+    return False
+
 @app.route("/spec")
 def spec():
     library = swagger(app)
@@ -129,8 +165,6 @@ def spec():
 
 '''
 Librarian Endpoints:
-* An endpoint to add a book (by ISBN) to the library.
-* An endpoint to remove a book (by its internal Id) from the library
 * An endpoint that generates a list of all overdue books.
 '''
 
@@ -166,11 +200,21 @@ def add_book():
         description: User does not have librarian privileges
       403:
         description: Book already exists
+      406:
+        description: ISBN invalid
     '''
     user = request.headers.get('user')
     if not check_user(user, True):
-        return {'Error': 'User (%s) does not have librarian privileges' % user}, 403
-    return {}
+        return {'Error': 'User (%s) does not have librarian privileges' % user}, 401
+    isbn = request.json.get('isbn')
+    if not check_isbn(isbn):
+        return {'Error': 'ISBN (%s) is invalid, must be 10 or 13 numbers' % isbn}, 406
+    if query_book_isbn(isbn):
+        return {'Error': 'ISBN (%s) already exists in library' % isbn}, 403
+    book_id = insert_book(request.json)
+    if book_id:
+        return {'Success': 'ISBN (%s) added to library as Book (%d)' % (isbn, book_id)}, 200
+    return {'Error': 'Failed to insert ISBN (%s)' % isbn}, 500
 
 @app.route("/librarian/book/<int:book_id>", methods=["DELETE"])
 def remove_book(book_id):
@@ -192,13 +236,18 @@ def remove_book(book_id):
         description: Book deleted successfully
       401:
         description: User does not have librarian privileges
-      403:
+      404:
         description: Book does not exist
     '''
     user = request.headers.get('user')
     if not check_user(user, True):
-        return {'Error': 'User (%s) does not have librarian privileges' % user}, 403
-    return {}
+        return {'Error': 'User (%s) does not have librarian privileges' % user}, 401
+    if not query_book_id(book_id):
+        return {'Error': 'Book (%d) does not exist in library' % book_id}, 404
+    error = delete_book_id(book_id)
+    if not error:
+        return {'Success': 'Book (%d) deleted successfully' % book_id}, 200
+    return {'Error': 'Failed to delete book (%d)' % book_id}, 500
 
 @app.route("/librarian/catalog", methods=["GET"])
 def list_catalog():
@@ -224,10 +273,11 @@ def list_catalog():
     '''
     user = request.headers.get('user')
     if not check_user(user, True):
-        return {'Error': 'User (%s) does not have librarian privileges' % user}, 403
+        return {'Error': 'User (%s) does not have librarian privileges' % user}, 401
     catalog = query_books()
     if not catalog:
         return {'Error': 'Library currently has no books'}, 404
+    # if request.args.get('details'):
     return jsonify(catalog)
 
 @app.route("/librarian/overdue", methods=["GET"])
@@ -249,7 +299,7 @@ def list_overdue():
     '''
     user = request.headers.get('user')
     if not check_user(user, True):
-        return {'Error': 'User (%s) does not have librarian privileges' % user}, 403
+        return {'Error': 'User (%s) does not have librarian privileges' % user}, 401
     return {}
 
 '''
@@ -279,6 +329,8 @@ def checkout_book(book_id):
     responses:
       200:
         description: Book successfully checked out
+      401:
+        description: User not valid
       403:
         description: User cannot check out
       404:
@@ -288,7 +340,9 @@ def checkout_book(book_id):
     '''
     user = request.headers.get('user')
     if not check_user(user, False):
-        return {'Error': 'User (%s) does not have library card' % user}, 403
+        return {'Error': 'User (%s) does not have library card' % user}, 401
+    if not query_book_id(book_id):
+        return {'Error': 'Book (%d) does not exist in library' % book_id}, 404
     return {}
 
 @app.route("/user/available", methods=["GET"])
@@ -305,14 +359,14 @@ def list_available():
     responses:
       200:
         description: List of all available books
-      403:
+      401:
         description: User not valid
       404:
         description: No books found
     '''
     user = request.headers.get('user')
     if not check_user(user, False):
-        return {'Error': 'User (%s) does not have library card' % user}, 403
+        return {'Error': 'User (%s) does not have library card' % user}, 401
     return {}
 
 @app.route("/user/return/<int:book_id>", methods=["GET"])
@@ -333,14 +387,16 @@ def return_book(book_id):
     responses:
       200:
         description: Book added
+      401:
+        description: User not valid
       403:
-        description: Book not checked out or invalid user
+        description: Book not checked out
       404:
         description: Book does not exist
     '''
     user = request.headers.get('user')
     if not check_user(user, False):
-        return {'Error': 'User (%s) does not have library card' % user}, 403
+        return {'Error': 'User (%s) does not have library card' % user}, 401
     return {}
 
 @app.route("/user/borrowed", methods=["GET"])
@@ -357,12 +413,12 @@ def list_borrowed():
     responses:
       200:
         description: List of all borrowed books
-      403:
+      401:
         description: User not valid
     '''
     user = request.headers.get('user')
     if not check_user(user, False):
-        return {'Error': 'User (%s) does not have library card' % user}, 403
+        return {'Error': 'User (%s) does not have library card' % user}, 401
     return {}
 
 if __name__ == '__main__':
