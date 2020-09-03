@@ -226,7 +226,8 @@ def list_catalog():
     if not check_user(user, True):
         return {'Error': 'User (%s) does not have librarian privileges' % user}, 403
     catalog = query_books()
-    print(catalog)
+    if not catalog:
+        return {'Error': 'Library currently has no books'}, 404
     return jsonify(catalog)
 
 @app.route("/librarian/overdue", methods=["GET"])
