@@ -18,8 +18,8 @@ max_books = 2
 def select_query(query):
     c = conn.cursor()
     c.execute(query)
-    cols = [c[0] for c in c.description]
     rows = [row for row in c.fetchall()]
+    cols = [c[0] for c in c.description]
     data = [dict(zip(cols, row)) for row in rows]
     return data
 
